@@ -1,4 +1,5 @@
-﻿using System;
+﻿using FluentValidation.Results;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
@@ -9,6 +10,9 @@ namespace NStore.Vendas.Domain
 {
     public class Pedido
     {
+        public static int MAX_UNIDADES_ITEM => 15;
+        public static int MIN_UNIDADES_ITEM => 1;
+
         public Pedido()
         {
             _pedidoItems = new List<PedidoItem>();
@@ -16,16 +20,47 @@ namespace NStore.Vendas.Domain
         }
         public Guid ClienteId { get; private set; }
         public decimal ValorTotal { get; private set; }
+        public decimal ValorDesconto { get; private set; }
         public PedidoStatus PedidoStatus { get; private set; }
+        public bool VoucherUtilizado { get; private set; }
+        public Voucher Voucher { get; private set; }
+
 
         private readonly List<PedidoItem> _pedidoItems;
         public IReadOnlyCollection<PedidoItem> PedidoItems => _pedidoItems;
 
+        private bool PedidoItemExistente(PedidoItem item)
+        {
+            return _pedidoItems.Any(p => p.ProdutoId == item.ProdutoId);
+        }
+
+        private void ValidarQuantidadeItemPermitida(PedidoItem item)
+        {
+            var quantidadeItems = item.Quantidade;
+            if (PedidoItemExistente(item))
+            {
+                var itemExistente = _pedidoItems.FirstOrDefault(p => p.ProdutoId == item.ProdutoId);
+                quantidadeItems += itemExistente.Quantidade;
+            }
+
+            if (quantidadeItems > MAX_UNIDADES_ITEM)
+                throw new DomainException($"Maximo de {Pedido.MAX_UNIDADES_ITEM} unidades por produto");
+        }
+
+        private void ValidarPedidoItemInexistente(PedidoItem pedidoItem)
+        {
+            if (!PedidoItemExistente(pedidoItem))
+                throw new DomainException("O item nao existe no pedido");
+        }
+
         public void AdicionarItem(PedidoItem pedidoItem)
         {
-            if(_pedidoItems.Any(p => p.ProdutoId == pedidoItem.ProdutoId))
+            ValidarQuantidadeItemPermitida(pedidoItem);
+            
+            if (PedidoItemExistente(pedidoItem))
             {
                 var itemExistente = _pedidoItems.FirstOrDefault(p => p.ProdutoId == pedidoItem.ProdutoId);
+
                 itemExistente.AdicionarUnidades(pedidoItem.Quantidade);
                 pedidoItem = itemExistente;
 
@@ -36,6 +71,28 @@ namespace NStore.Vendas.Domain
             CalcularValorPedido();
         }
 
+        public void AtualizarItem(PedidoItem pedidoItem)
+        {
+            ValidarPedidoItemInexistente(pedidoItem);
+
+            var itemExistente = _pedidoItems.FirstOrDefault(p => p.ProdutoId == pedidoItem.ProdutoId);
+
+            _pedidoItems.Remove(itemExistente);
+            _pedidoItems.Add(pedidoItem);
+
+            CalcularValorPedido();
+        }
+
+        public void RemoverItem(PedidoItem pedidoItem)
+        {
+            ValidarPedidoItemInexistente(pedidoItem);
+
+            var itemExistente = _pedidoItems.FirstOrDefault(p => p.ProdutoId == pedidoItem.ProdutoId);
+            _pedidoItems.Remove(itemExistente);
+
+            CalcularValorPedido();
+        }
+
         public void TornarRascunho()
         {
             PedidoStatus = PedidoStatus.Rascunho;
@@ -43,7 +100,41 @@ namespace NStore.Vendas.Domain
 
         public void CalcularValorPedido()
         {
-            ValorTotal = PedidoItems.Sum(i => i.CalcularValor());
+            var valorSemDesconto = PedidoItems.Sum(i => i.CalcularValor());
+            var valorTotal = valorSemDesconto;
+
+            if (VoucherUtilizado)
+            {
+                if(Voucher.TipoDescontoVoucher == TipoDescontoVoucher.Valor)
+                    valorTotal -= Voucher.ValorDesconto.Value;
+                if (Voucher.TipoDescontoVoucher == TipoDescontoVoucher.Porcentagem)
+                    valorTotal *= (Voucher.PercentualDesconto.Value/100);
+            }
+
+            if (valorTotal < 0)
+            {
+                ValorTotal = 0;
+                ValorDesconto = valorSemDesconto;
+            } else
+            {
+                ValorTotal = valorTotal;
+                ValorDesconto = valorSemDesconto - valorTotal;
+            }
+
+
+        }
+
+        public ValidationResult AplicarVoucher(Voucher voucher)
+        {
+            var result = voucher.ValidarSeAplicavel();
+            if (!result.IsValid)
+                return result;
+
+            Voucher = voucher;
+            VoucherUtilizado = true;
+            CalcularValorPedido();
+
+            return result;
         }
 
         public static class PedidoFactory
@@ -58,42 +149,6 @@ namespace NStore.Vendas.Domain
                 pedido.TornarRascunho();
                 return pedido;
             }
-        }
-    }
-
-    public enum PedidoStatus
-    {
-        Rascunho = 0,
-        Iniciado = 1,
-        Pago = 4,
-        Entregue = 5,
-        Cancelado = 6
-    }
-
-    public class PedidoItem
-    {
-
-        public Guid ProdutoId { get; private set; }
-        public string ProdutoNome { get; private set; }
-        public int Quantidade { get; private set; }
-        public decimal ValorUnitario { get; private set; }
-
-        public PedidoItem(Guid produtoId, string produtoNome, int quantidade, decimal valorUnitario)
-        {
-            ProdutoId = produtoId;
-            ProdutoNome = produtoNome;
-            Quantidade = quantidade;
-            ValorUnitario = valorUnitario;
-        }
-
-        internal void AdicionarUnidades(int unidades)
-        {
-            Quantidade += unidades;
-        }
-
-        internal decimal CalcularValor()
-        {
-            return Quantidade * ValorUnitario;
         }
     }
 }
